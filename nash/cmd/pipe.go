@@ -3,13 +3,49 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 )
 
+func buildPipe(cmds []*exec.Cmd) error {
+	var err error
+
+	if len(cmds) < 2 {
+		return errors.New("at least 2 programs")
+	}
+
+	last := len(cmds) - 1
+
+	cmds[0].Stdin = os.Stdin
+
+	for i := 0; i < last; i++ {
+		cmd := cmds[i]
+
+		cmd.Stderr = os.Stderr
+		cmds[i+1].Stdin, err = cmd.StdoutPipe()
+
+		if err != nil {
+			return err
+		}
+	}
+
+	file, err := os.OpenFile("./out", os.O_RDWR|os.O_CREATE, 0755)
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "err: %s\n", err.Error())
+		os.Exit(1)
+	}
+
+	cmds[last].Stderr = os.Stderr
+	cmds[last].Stdout = file
+
+	return nil
+}
+
 func main() {
-	var err, err1, err2 error
+	var err error
 
 	cmd1 := exec.Cmd{
 		Path: "./gen",
@@ -23,56 +59,32 @@ func main() {
 		Path: "./filter",
 	}
 
-	cmd1.Stdin = os.Stdin
-	cmd1.Stderr = os.Stderr
+	cmds := []*exec.Cmd{
+		&cmd1,
+		&cmd2,
+		&cmd3,
+	}
 
-	cmd2.Stdin, err1 = cmd1.StdoutPipe()
-	cmd2.Stderr = os.Stderr
-
-	file, err := os.OpenFile("./out", os.O_RDWR|os.O_CREATE, 0755)
+	err = buildPipe(cmds)
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "err: %s\n", err.Error())
 		os.Exit(1)
 	}
 
-	cmd3.Stdin, err2 = cmd2.StdoutPipe()
-	cmd3.Stderr = os.Stderr
-	cmd3.Stdout = file
-
-	if err1 != nil || err2 != nil {
-		fmt.Fprintf(os.Stderr, "Err: %s, %s\n", err1, err2)
-		os.Exit(1)
+	for _, cmd := range cmds {
+		fmt.Printf("starting: %s\n", cmd.Path)
+		if err = cmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "start: %s\n", err.Error())
+			os.Exit(1)
+		}
 	}
 
-	if err = cmd1.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "err: %s\n", err.Error())
-		os.Exit(1)
+	for _, cmd := range cmds {
+		fmt.Printf("Waiting: %s\n", cmd.Path)
+		if err = cmd.Wait(); err != nil {
+			fmt.Fprintf(os.Stderr, "wait: %s\n", err.Error())
+			os.Exit(1)
+		}
 	}
-
-	if err = cmd2.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "err: %s\n", err.Error())
-		os.Exit(1)
-	}
-
-	if err = cmd3.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "err: %s\n", err.Error())
-		os.Exit(1)
-	}
-
-	if err = cmd1.Wait(); err != nil {
-		fmt.Fprintf(os.Stderr, "err: %s\n", err.Error())
-		os.Exit(1)
-	}
-
-	if err = cmd2.Wait(); err != nil {
-		fmt.Fprintf(os.Stderr, "err: %s\n", err.Error())
-		os.Exit(1)
-	}
-
-	if err = cmd3.Wait(); err != nil {
-		fmt.Fprintf(os.Stderr, "err: %s\n", err.Error())
-		os.Exit(1)
-	}
-
 }
