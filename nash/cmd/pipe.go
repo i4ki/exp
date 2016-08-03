@@ -1,3 +1,5 @@
+// Example program to execute a pipeline of programs writing
+// the result to a file.
 package main
 
 import (
