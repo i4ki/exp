@@ -15,38 +15,27 @@ type (
 	Cmd struct {
 		*exec.Cmd
 
-		fdMap map[uint]RW
-	}
-
-	RW struct {
-		reader io.ReadCloser
-		writer io.WriteCloser
+		fdIn  map[uint]io.Reader
+		fdOut map[uint]io.Writer
 	}
 )
-
-func NewRW(r io.ReadCloser, w io.WriteCloser) RW {
-	return RW{
-		reader: r,
-		writer: w,
-	}
-}
 
 func NewCmd(path string) Cmd {
 	cmd := Cmd{}
 	cmd.Cmd = &exec.Cmd{}
 	cmd.Cmd.Path = path
-	cmd.fdMap = make(map[uint]RW)
+	cmd.fdIn = make(map[uint]io.Reader)
+	cmd.fdOut = make(map[uint]io.Writer)
 
 	return cmd
 }
 
-func (c *Cmd) Setfd(n uint, fd RW) {
-	c.fdMap[n] = fd
+func (c *Cmd) SetInputfd(n uint, in io.Reader) {
+	c.fdIn[n] = in
 }
 
-func (c *Cmd) Getfd(n uint) (RW, bool) {
-	fd, ok := c.fdMap[n]
-	return fd, ok
+func (c *Cmd) SetOutputfd(n uint, out io.Writer) {
+	c.fdOut[n] = out
 }
 
 func (c *Cmd) setStdin(value io.Reader) {
@@ -70,37 +59,32 @@ func (c *Cmd) addExtraFile(value *os.File) {
 }
 
 func (c *Cmd) applyFd() error {
-	for fd, value := range c.fdMap {
+	for fd, value := range c.fdIn {
 		switch fd {
 		case 0:
-			if value.reader == nil {
-				return fmt.Errorf("Stdin requires a Reader")
-			}
-
-			c.setStdin(value.reader) // ReadWriteCloser implements Reader
-		case 1:
-			if value.writer == nil {
-				return fmt.Errorf("Stdout requires a Writer")
-			}
-
-			c.setStdout(value.writer)
-		case 2:
-			if value.writer == nil {
-				return fmt.Errorf("Stderr requires a Writer")
-			}
-
-			c.setStderr(value.writer)
+			c.setStdin(value)
 		default:
-			writer := value.writer
-
-			if writer == nil {
-				return fmt.Errorf("aditional fd requires a writer")
-			}
-
-			file, ok := writer.(*os.File)
+			file, ok := value.(*os.File)
 
 			if !ok {
-				return fmt.Errorf("Invalid file for command ExtraFiles")
+				return fmt.Errorf("ExtraFiles requires a file object.")
+			}
+
+			c.addExtraFile(file)
+		}
+	}
+
+	for fd, value := range c.fdOut {
+		switch fd {
+		case 1:
+			c.setStdout(value)
+		case 2:
+			c.setStderr(value)
+		default:
+			file, ok := value.(*os.File)
+
+			if !ok {
+				return fmt.Errorf("ExtraFiles requires a file object.")
 			}
 
 			c.addExtraFile(file)
@@ -133,12 +117,12 @@ func buildPipe(cmds []*Cmd) error {
 
 	last := len(cmds) - 1
 
-	cmds[0].Setfd(0, NewRW(os.Stdin, nil))
+	cmds[0].SetInputfd(0, os.Stdin)
 
 	for i := 0; i < last; i++ {
 		cmd := cmds[i]
 
-		cmd.Setfd(2, NewRW(nil, os.Stderr))
+		cmd.SetOutputfd(2, os.Stderr)
 
 		stdin, err := cmd.StdoutPipe()
 
@@ -146,7 +130,7 @@ func buildPipe(cmds []*Cmd) error {
 			return err
 		}
 
-		cmds[i+1].Setfd(0, NewRW(stdin, nil))
+		cmds[i+1].SetInputfd(0, stdin)
 	}
 
 	file, err := os.OpenFile("./out", os.O_RDWR|os.O_CREATE, 0755)
@@ -156,8 +140,8 @@ func buildPipe(cmds []*Cmd) error {
 		os.Exit(1)
 	}
 
-	cmds[last].Setfd(2, NewRW(nil, os.Stderr))
-	cmds[last].Setfd(1, NewRW(nil, file))
+	cmds[last].SetOutputfd(2, os.Stderr)
+	cmds[last].SetOutputfd(1, file)
 
 	return nil
 }
