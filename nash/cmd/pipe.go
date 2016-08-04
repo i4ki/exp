@@ -5,11 +5,126 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 )
 
-func buildPipe(cmds []*exec.Cmd) error {
+type (
+	// Cmd is the command specification
+	Cmd struct {
+		*exec.Cmd
+
+		fdMap map[uint]RW
+	}
+
+	RW struct {
+		reader io.ReadCloser
+		writer io.WriteCloser
+	}
+)
+
+func NewRW(r io.ReadCloser, w io.WriteCloser) RW {
+	return RW{
+		reader: r,
+		writer: w,
+	}
+}
+
+func NewCmd(path string) Cmd {
+	cmd := Cmd{}
+	cmd.Cmd = &exec.Cmd{}
+	cmd.Cmd.Path = path
+	cmd.fdMap = make(map[uint]RW)
+
+	return cmd
+}
+
+func (c *Cmd) Setfd(n uint, fd RW) {
+	c.fdMap[n] = fd
+}
+
+func (c *Cmd) Getfd(n uint) (RW, bool) {
+	fd, ok := c.fdMap[n]
+	return fd, ok
+}
+
+func (c *Cmd) setStdin(value io.Reader) {
+	c.Cmd.Stdin = value
+}
+
+func (c *Cmd) setStdout(value io.Writer) {
+	c.Cmd.Stdout = value
+}
+
+func (c *Cmd) setStderr(value io.Writer) {
+	c.Cmd.Stderr = value
+}
+
+func (c *Cmd) addExtraFile(value *os.File) {
+	if c.Cmd.ExtraFiles == nil {
+		c.Cmd.ExtraFiles = make([]*os.File, 0, 8)
+	}
+
+	c.Cmd.ExtraFiles = append(c.Cmd.ExtraFiles, value)
+}
+
+func (c *Cmd) applyFd() error {
+	for fd, value := range c.fdMap {
+		switch fd {
+		case 0:
+			if value.reader == nil {
+				return fmt.Errorf("Stdin requires a Reader")
+			}
+
+			c.setStdin(value.reader) // ReadWriteCloser implements Reader
+		case 1:
+			if value.writer == nil {
+				return fmt.Errorf("Stdout requires a Writer")
+			}
+
+			c.setStdout(value.writer)
+		case 2:
+			if value.writer == nil {
+				return fmt.Errorf("Stderr requires a Writer")
+			}
+
+			c.setStderr(value.writer)
+		default:
+			writer := value.writer
+
+			if writer == nil {
+				return fmt.Errorf("aditional fd requires a writer")
+			}
+
+			file, ok := writer.(*os.File)
+
+			if !ok {
+				return fmt.Errorf("Invalid file for command ExtraFiles")
+			}
+
+			c.addExtraFile(file)
+		}
+	}
+
+	return nil
+}
+
+func (c *Cmd) Start() error {
+	err := c.applyFd()
+
+	if err != nil {
+		return err
+	}
+
+	return c.Cmd.Start()
+}
+
+func (c *Cmd) Wait() error {
+	return c.Cmd.Wait()
+}
+
+func buildPipe(cmds []*Cmd) error {
 	var err error
 
 	if len(cmds) < 2 {
@@ -18,17 +133,20 @@ func buildPipe(cmds []*exec.Cmd) error {
 
 	last := len(cmds) - 1
 
-	cmds[0].Stdin = os.Stdin
+	cmds[0].Setfd(0, NewRW(os.Stdin, nil))
 
 	for i := 0; i < last; i++ {
 		cmd := cmds[i]
 
-		cmd.Stderr = os.Stderr
-		cmds[i+1].Stdin, err = cmd.StdoutPipe()
+		cmd.Setfd(2, NewRW(nil, os.Stderr))
+
+		stdin, err := cmd.StdoutPipe()
 
 		if err != nil {
 			return err
 		}
+
+		cmds[i+1].Setfd(0, NewRW(stdin, nil))
 	}
 
 	file, err := os.OpenFile("./out", os.O_RDWR|os.O_CREATE, 0755)
@@ -38,8 +156,8 @@ func buildPipe(cmds []*exec.Cmd) error {
 		os.Exit(1)
 	}
 
-	cmds[last].Stderr = os.Stderr
-	cmds[last].Stdout = file
+	cmds[last].Setfd(2, NewRW(nil, os.Stderr))
+	cmds[last].Setfd(1, NewRW(nil, file))
 
 	return nil
 }
@@ -47,19 +165,11 @@ func buildPipe(cmds []*exec.Cmd) error {
 func main() {
 	var err error
 
-	cmd1 := exec.Cmd{
-		Path: "./gen",
-	}
+	cmd1 := NewCmd("./gen")
+	cmd2 := NewCmd("./toupper")
+	cmd3 := NewCmd("./filter")
 
-	cmd2 := exec.Cmd{
-		Path: "./toupper",
-	}
-
-	cmd3 := exec.Cmd{
-		Path: "./filter",
-	}
-
-	cmds := []*exec.Cmd{
+	cmds := []*Cmd{
 		&cmd1,
 		&cmd2,
 		&cmd3,
